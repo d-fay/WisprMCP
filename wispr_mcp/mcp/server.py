@@ -47,6 +47,11 @@ class MCPServer:
     
     def _handle_initialize(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
         """Handle initialize request."""
+        try:
+            from .. import __version__ as server_version
+        except ImportError:
+            server_version = "0.0.0"
+        
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -60,7 +65,7 @@ class MCPServer:
                 },
                 "serverInfo": {
                     "name": "wispr-mcp",
-                    "version": "0.1.0"
+                    "version": server_version
                 }
             }
         }

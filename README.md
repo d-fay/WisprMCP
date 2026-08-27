@@ -6,6 +6,9 @@ WisprMCP provides programmatic access to your Wispr Flow local database, enablin
 
 ## Recent Updates
 
+- **2026-08-27**: Added meetings support -- AI summaries, user notes, speaker-attributed NDJSON transcripts, todos, notetaker chats, calendar pre-reads, and a `get_datasource_inventory` drift check (10 tools -> 22)
+- **2026-08-27**: Fixed `get_dictionary_entries`, which failed with `no such column: frequencySeen` after a Wispr Flow schema migration; queries now resolve columns at runtime
+- **2026-08-27**: Database is now opened read-only
 - **2025-07-04**: Added collect command for word extraction by day (similar to GranolaMCP)
 - **2025-07-04**: Added sane defaults - `wispr list` now defaults to last 2 days
 - **2025-07-04**: Fixed timestamp parsing for proper date filtering and time display
@@ -48,7 +51,9 @@ WisprMCP provides programmatic access to your Wispr Flow local database, enablin
 - **Ready for analysis**: Word clouds, linguistic analysis, voice training
 - **Example**: `wispr collect ./my-words` → creates `2025-07-04.txt` with YOUR words
 
-### 🤖 **MCP Server Integration (10 Tools)**
+### 🤖 **MCP Server Integration (22 Tools)**
+
+**Dictation transcripts**
 
 | Tool | Purpose |
 |------|---------|
@@ -59,15 +64,45 @@ WisprMCP provides programmatic access to your Wispr Flow local database, enablin
 | `get_conversations` | Get grouped conversations |
 | `get_conversation` | Get specific conversation |
 | `get_app_statistics` | App usage statistics |
-| `get_database_statistics` | Overall database stats |
 | `export_transcripts` | Export data in various formats |
-| `get_dictionary_entries` | Custom dictionary entries |
+| `get_dictionary_entries` | Custom dictionary and snippet entries |
+
+**Meetings** (title, AI summary, "My Thoughts" notes, speaker-attributed transcript)
+
+| Tool | Purpose |
+|------|---------|
+| `list_meetings` | List meetings with participants and artifact availability |
+| `get_meeting` | One meeting, optionally with its transcript |
+| `get_meeting_summary` | Just the AI summary and user notes (cheapest) |
+| `get_meeting_transcript` | Speaker-attributed transcript from the NDJSON artifact |
+| `search_meetings` | Search titles, summaries, notes, and optionally transcripts |
+
+**Notes, todos, chats, calendar**
+
+| Tool | Purpose |
+|------|---------|
+| `list_notes` | List standalone notes |
+| `get_note` | One note with content and transform history |
+| `list_todos` | Action items, optionally scoped to a meeting |
+| `list_notetaker_chats` | AI chat threads about meetings |
+| `get_notetaker_chat` | One chat thread with all turns |
+| `list_calendar_events` | Synced events with AI pre-read briefings |
+
+**Diagnostics**
+
+| Tool | Purpose |
+|------|---------|
+| `get_database_statistics` | Counts across every surface, plus date ranges |
+| `get_datasource_inventory` | Every table, row count, and read coverage |
 
 **MCP Features:**
 - JSON-RPC 2.0 STDIO compliant for Claude Desktop
-- Real-time database access for AI workflows
-- Conversation grouping and analysis
-- Usage statistics and patterns
+- Read-only database access (opened `mode=ro`); never mutates Wispr Flow data
+- Meeting transcripts assembled from on-disk NDJSON with speaker-name resolution
+  and user corrections applied
+- Runtime column resolution, so a Wispr Flow schema migration degrades instead of
+  raising `no such column`
+- Token-aware transcript output: `text` (default), `markdown`, or capped `json`
 
 ## Installation
 
@@ -168,6 +203,9 @@ export WISPR_DATABASE_PATH="/path/to/custom/flow.sqlite"
 
 # Custom backup directory
 export WISPR_BACKUP_DIR="/path/to/backups"
+
+# Custom meetings artifact directory (NDJSON transcripts)
+export WISPR_MEETINGS_DIR="/path/to/meetings"
 ```
 
 ### Configuration File
@@ -177,6 +215,7 @@ Create `~/.wispr_mcp/.env`:
 ```bash
 WISPR_DATABASE_PATH=/custom/path/flow.sqlite
 WISPR_BACKUP_DIR=/custom/backups
+WISPR_MEETINGS_DIR=/custom/path/meetings
 ```
 
 ## CLI Usage
@@ -344,16 +383,23 @@ Add to your Claude Desktop configuration file:
 
 ### Available MCP Tools
 
-1. **get_recent_transcripts** - Get most recent transcripts
-2. **list_transcripts** - List with date/app filters
-3. **search_transcripts** - Search for specific text
-4. **get_transcript** - Get specific transcript by ID
-5. **get_conversations** - Get grouped conversations
-6. **get_conversation** - Get specific conversation
-7. **get_app_statistics** - App usage statistics
-8. **get_database_statistics** - Overall database stats
-9. **export_transcripts** - Export data in various formats
-10. **get_dictionary_entries** - Custom dictionary entries
+**Dictation:** `get_recent_transcripts`, `list_transcripts`,
+`search_transcripts`, `get_transcript`, `get_conversations`, `get_conversation`,
+`get_app_statistics`, `export_transcripts`, `get_dictionary_entries`
+
+**Meetings:** `list_meetings`, `get_meeting`, `get_meeting_summary`,
+`get_meeting_transcript`, `search_meetings`
+
+**Notes / todos / chats / calendar:** `list_notes`, `get_note`, `list_todos`,
+`list_notetaker_chats`, `get_notetaker_chat`, `list_calendar_events`
+
+**Diagnostics:** `get_database_statistics`, `get_datasource_inventory`
+
+Meeting transcripts are read from disk, not the database. `get_meeting_transcript`
+defaults to `format="text"` (speaker-attributed plain text) because a full
+structured transcript can be tens of thousands of tokens; use `format="json"` with
+`max_entries` when you need timings, and `source="live"` for raw uncoalesced
+utterances instead of the refined pass.
 
 ### Example MCP Usage in Claude
 
@@ -444,10 +490,29 @@ WisprMCP works with Wispr Flow's SQLite database schema:
 
 ### Main Tables
 
-- **History**: Primary transcript entries with ASR, formatted, and edited text
-- **Dictionary**: Custom vocabulary entries for speech recognition
-- **RemoteNotifications**: Push notifications (typically empty)
-- **Notes**: User notes (typically empty)
+- **History**: Dictation entries with ASR, formatted, and edited text
+- **Dictionary**: Custom vocabulary and snippet entries
+- **Meetings**: Recorded meetings with AI `summary`, user `notes`, and `speakerMap`
+- **TranscriptCorrections**: User edits to individual meeting transcript entries
+- **Notes** / **NoteVersions** / **NoteImages**: Standalone notes and their history
+- **Todos**: Action items, optionally linked to a meeting
+- **NotetakerChats** / **NotetakerChatMessages**: AI chat threads about a meeting
+- **CalendarEvents**: Synced events with AI pre-read briefings
+- **SharedNotes**: Notes shared by slug
+
+### On-Disk Meeting Artifacts
+
+Meeting transcript text is **not** in the database. It lives beside it:
+
+```
+~/Library/Application Support/Wispr Flow/meetings/<meetingId>/
+    live.ndjson      raw diarized utterances
+    refined.ndjson   server-refined, coalesced utterances
+    upload.ogg       recorded audio (never read by this connector)
+```
+
+`Meetings.speakerMap` maps the NDJSON numeric `speaker.id` to a person name; see
+`wispr_flow_database_schema.md` for the resolution precedence and line formats.
 
 ### Key Fields
 

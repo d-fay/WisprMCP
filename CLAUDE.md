@@ -71,7 +71,8 @@ python wispr_mcp/mcp/server.py --debug    # Run MCP server in debug mode
 
 ### MCP Integration
 - JSON-RPC 2.0 compliant server
-- 10 comprehensive tools for AI integration
+- 22 tools for AI integration (dictation, meetings, notes, todos,
+  notetaker chats, calendar, diagnostics)
 - Async/await pattern for server handling
 - Proper error responses and tool schemas
 
@@ -82,9 +83,12 @@ wispr_mcp/
 ├── __init__.py                 # Package exports
 ├── __main__.py                 # Module execution entry
 ├── core/
-│   ├── parser.py              # Main database access
-│   ├── transcript.py          # Transcript data models
-│   └── conversation.py        # Conversation data models
+│   ├── parser.py              # Main database access (read-only, runtime columns)
+│   ├── transcript.py          # Dictation transcript data models
+│   ├── conversation.py        # Conversation data models
+│   ├── meeting.py             # Meeting + speaker-map + meeting-transcript models
+│   ├── notes.py               # Note, todo, notetaker-chat, calendar models
+│   └── artifacts.py           # On-disk NDJSON meeting artifact reader
 ├── utils/
 │   ├── config.py              # Configuration management
 │   └── date_parser.py         # Date parsing utilities
@@ -99,21 +103,33 @@ wispr_mcp/
 
 ## Database Schema Reference
 
-The Wispr Flow database contains:
+See `wispr_flow_database_schema.md` for the full verified schema. Summary:
 
-- **History table**: Main transcript entries
-- **Dictionary table**: Custom vocabulary
-- **RemoteNotifications**: Push notifications (usually empty)
-- **Notes**: User notes (usually empty)
+- **History**: dictation entries (`asrText`, `formattedText`, `editedText`,
+  `timestamp`, `app`, `conversationId`, `duration`, `numWords`,
+  `additionalContext`)
+- **Dictionary**: custom vocabulary and snippets
+- **Meetings**: recorded meetings with AI `summary`, user `notes`, `speakerMap`
+- **TranscriptCorrections**: per-entry user edits to meeting transcripts
+- **Notes**/**NoteVersions**/**NoteImages**, **SharedNotes**: notes and history
+- **Todos**: action items, optionally linked to a meeting
+- **NotetakerChats**/**NotetakerChatMessages**: AI chat threads about a meeting
+- **CalendarEvents**: synced events with AI pre-read briefings
 
-Key fields in History table:
-- `transcriptEntityId`: Unique identifier
-- `asrText`, `formattedText`, `editedText`: Text versions
-- `timestamp`: Creation time
-- `app`: Application bundle ID
-- `conversationId`: Conversation grouping
-- `duration`, `numWords`: Metrics
-- `additionalContext`: JSON context data
+Three things bite anyone extending the parser:
+
+1. **Meeting transcript text is not in SQLite.** It is NDJSON on disk at
+   `<app support>/Wispr Flow/meetings/<meetingId>/{live,refined}.ndjson`. The
+   `Meetings` row supplies the speaker map that turns numeric diarization ids into
+   names.
+2. **Columns move.** Wispr Flow has dropped columns that earlier releases had
+   (`Dictionary.frequencySeen`, `Dictionary.lastSeen`), so queries resolve columns
+   at runtime via `PRAGMA table_info` rather than hardcoding a SELECT list.
+3. **Three timestamp conventions coexist:** UTC-suffixed text
+   (`2026-08-27 18:00:28.160 +00:00`), epoch milliseconds (`endedAt`, `startAtUtc`),
+   and NDJSON display offsets (`"0:01"`). All parsed datetimes are normalized to
+   UTC-aware, and date bounds are rendered space-separated so string comparison
+   against the stored format is a valid prefix compare.
 
 ## Common Issues and Solutions
 

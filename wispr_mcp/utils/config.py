@@ -61,6 +61,19 @@ class Config:
         return default_path
     
     @property
+    def wispr_meetings_dir(self) -> Path:
+        """Get the path to the per-meeting NDJSON artifact directory.
+
+        Meeting transcripts live on disk rather than in the database, one
+        directory per meeting id, as a sibling of flow.sqlite.
+        """
+        meetings_dir = self.get('WISPR_MEETINGS_DIR')
+        if meetings_dir:
+            return Path(meetings_dir)
+
+        return self.wispr_database_path.parent / "meetings"
+
+    @property
     def wispr_backup_dir(self) -> Path:
         """Get the path to the Wispr Flow backup directory."""
         backup_dir = self.get('WISPR_BACKUP_DIR')

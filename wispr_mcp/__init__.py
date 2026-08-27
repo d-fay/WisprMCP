@@ -8,8 +8,26 @@ enabling users to query transcripts, search conversations, and analyze communica
 from .core.parser import WisprParser
 from .core.transcript import Transcript, TranscriptEntry
 from .core.conversation import Conversation
+from .core.artifacts import MeetingArtifactStore
+from .core.meeting import (
+    Meeting,
+    MeetingMarker,
+    MeetingTranscript,
+    MeetingTranscriptEntry,
+    SpeakerMap,
+)
+from .core.notes import (
+    CalendarEvent,
+    Note,
+    NotetakerChat,
+    NotetakerChatMessage,
+    NoteVersion,
+    SharedNote,
+    Todo,
+    TranscriptCorrection,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Pedram"
 
 __all__ = [
@@ -17,4 +35,18 @@ __all__ = [
     "Transcript", 
     "TranscriptEntry",
     "Conversation",
+    "MeetingArtifactStore",
+    "Meeting",
+    "MeetingMarker",
+    "MeetingTranscript",
+    "MeetingTranscriptEntry",
+    "SpeakerMap",
+    "Note",
+    "NoteVersion",
+    "NotetakerChat",
+    "NotetakerChatMessage",
+    "Todo",
+    "CalendarEvent",
+    "SharedNote",
+    "TranscriptCorrection",
 ]

@@ -1,231 +1,285 @@
-# Wispr Flow Database Schema Analysis
+# Wispr Flow Database Schema
 
-## Database Location
-`/Users/pedram/Library/Application Support/Wispr Flow/flow.sqlite`
+Verified against Wispr Flow on macOS, 2026-08-27 (26 tables, 149 applied Sequelize
+migrations). Row counts are omitted deliberately -- they are machine-specific and
+drift immediately. Use the `get_datasource_inventory` MCP tool for live counts and
+to spot tables this connector does not yet read.
 
-## Database Overview
-- **Primary Database**: `flow.sqlite` (main application database)
-- **Backup Files**: `backup-2025-07-03T17-00-00.059Z.sqlite` (automated backups)
-- **Related Files**: `SharedStorage`, `SharedStorage-wal`, `config.json`
+## Storage layout
 
-## Tables Overview
-
-### 1. History Table (395 records)
-**Purpose**: Main table storing speech-to-text transcription history and metadata
-
-**Key Fields**:
-- `transcriptEntityId` (VARCHAR(36), PRIMARY KEY): Unique identifier for each transcription
-- `asrText` (TEXT): Original ASR (Automatic Speech Recognition) text
-- `formattedText` (TEXT): AI-formatted version of the ASR text
-- `editedText` (TEXT): User-edited version of the text
-- `timestamp` (DATETIME): When the transcription was created
-- `audio` (BLOB): Audio recording data
-- `screenshot` (BLOB): Screenshot data
-- `additionalContext` (JSON): Contextual information including user data, accessibility context
-- `status` (VARCHAR(255)): Processing status (formatted, empty, extension_other, etc.)
-- `app` (VARCHAR(255)): Application where transcription was used
-- `url` (VARCHAR(255)): URL if applicable
-- `e2eLatency` (FLOAT): End-to-end latency measurement
-- `duration` (FLOAT): Recording duration in seconds
-- `numWords` (INTEGER): Word count
-- `shareType` (TEXT): Sharing configuration
-- `language` (TEXT): Detected/specified language
-- `isArchived` (TINYINT(1)): Archive flag
-- `conversationId` (VARCHAR(255)): Conversation grouping identifier
-
-**Advanced Fields**:
-- `toneMatchedText` (TEXT): Tone-adjusted text
-- `toneMatchPairs` (JSONB): Tone matching data
-- `feedback` (TEXT): User feedback
-- `micDevice` (TEXT): Microphone device used
-- `formattingDivergenceScore` (FLOAT): Quality metrics
-- `fallbackAsrText`, `fallbackFormattedText` (TEXT): Fallback processing results
-- `averageLogProb` (FLOAT): Confidence metrics
-- `axText`, `axHTML` (TEXT): Accessibility text extraction
-- `userEditMetaData` (JSON): Edit tracking metadata
-- `opusChunks` (JSON): Audio chunk information
-
-**Indexes**:
-- `idx_formattedText` ON `formattedText`
-- `idx_timestamp_archived` ON `timestamp`, `isArchived`
-- `idx_duration_numWords` ON `numWords`, `duration`
-- `idx_editedtextstatus_conversationid_timestamp_app_url` ON multiple fields
-
-### 2. Dictionary Table (23 records)
-**Purpose**: Custom dictionary for user-specific terms and corrections
-
-**Fields**:
-- `phrase` (VARCHAR(255), PRIMARY KEY): The dictionary entry
-- `lastUsed` (DATETIME): When the phrase was last used
-- `lastSeen` (DATETIME): When the phrase was last seen
-- `frequencyUsed` (INTEGER): Usage frequency counter
-- `frequencySeen` (INTEGER): Seen frequency counter
-- `manualEntry` (TINYINT(1)): Whether manually added by user
-- `source` (TEXT): Source of the entry (manual, user_edits)
-- `replacement` (VARCHAR(255)): Replacement text if applicable
-- `id` (VARCHAR(36)): Unique identifier
-- `createdAt`, `modifiedAt` (DATETIME): Timestamps
-- `isDeleted` (TINYINT(1)): Soft delete flag
-
-### 3. RemoteNotifications Table (0 records)
-**Purpose**: Push notifications from remote services
-
-**Fields**:
-- `id` (VARCHAR(36), PRIMARY KEY): Notification ID
-- `type`, `key` (VARCHAR(255)): Notification categorization
-- `title` (VARCHAR(255)): Notification title
-- `text` (TEXT): Notification content
-- `isArchived`, `isRead` (TINYINT(1)): Status flags
-- `createdAt`, `updatedAt` (DATETIME): Timestamps
-- `synced` (TINYINT(1)): Sync status
-
-### 4. Notes Table (0 records)
-**Purpose**: User notes storage
-
-**Fields**:
-- `id` (VARCHAR(36), PRIMARY KEY): Note ID
-- `title` (VARCHAR(255)): Note title
-- `contentPreview` (TEXT): Preview text
-- `content` (TEXT): Full note content
-- `createdAt`, `modifiedAt` (DATETIME): Timestamps
-- `synced` (TINYINT(1)): Sync status
-- `isDeleted` (TINYINT(1)): Soft delete flag
-
-### 5. SequelizeMeta Table
-**Purpose**: Database migration tracking (Sequelize ORM)
-
-## Usage Statistics
-
-### Most Active Applications:
-1. Slack (`com.tinyspeck.slackmacgap`) - 109 records
-2. Obsidian (`md.obsidian`) - 58 records
-3. (Unknown/blank) - 55 records
-4. Messages (`com.apple.MobileSMS`) - 48 records
-5. VS Code (`com.microsoft.VSCode`) - 39 records
-6. Chrome (`com.google.Chrome`) - 26 records
-7. Wispr Flow (`com.electron.wispr-flow`) - 12 records
-8. ChatGPT (`com.openai.chat`) - 10 records
-
-### Status Distribution:
-- `formatted`: 306 records (77.5%)
-- (blank): 46 records (11.6%)
-- `empty`: 18 records (4.6%)
-- `extension_other`: 11 records (2.8%)
-- `no_audio`: 8 records (2.0%)
-- `extension_paste`: 5 records (1.3%)
-- `dismissed`: 1 record (0.3%)
-
-## Sample Queries
-
-### Recent Transcriptions
-```sql
-SELECT 
-    transcriptEntityId,
-    asrText,
-    formattedText,
-    timestamp,
-    app,
-    duration,
-    numWords,
-    status
-FROM History 
-WHERE isArchived = 0 
-ORDER BY timestamp DESC 
-LIMIT 10;
+```
+~/Library/Application Support/Wispr Flow/
+├── flow.sqlite                      main database (Sequelize/SQLite)
+├── flow.sqlite-shm / -wal           WAL sidecars (app may hold these open)
+├── backups/                         timestamped automated backups
+└── meetings/
+    └── <meetingId>/
+        ├── live.ndjson              raw diarized utterances (recording time)
+        ├── refined.ndjson           server-refined, coalesced utterances
+        └── upload.ogg               recorded audio
 ```
 
-### Application Usage Analysis
-```sql
-SELECT 
-    app,
-    COUNT(*) as total_uses,
-    AVG(duration) as avg_duration,
-    AVG(numWords) as avg_words,
-    AVG(e2eLatency) as avg_latency
-FROM History 
-WHERE app IS NOT NULL 
-GROUP BY app 
-ORDER BY total_uses DESC;
+**Meeting transcript text is not in the database.** The `Meetings` row holds the
+title, AI summary, user notes, and speaker map; the utterances live in the NDJSON
+artifacts above. Anything that renders a meeting transcript must read both.
+
+Connections should be opened read-only (`file:...?mode=ro`) -- the app writes to
+this database concurrently and this connector never mutates it.
+
+## Dictation surface
+
+### History
+Speech-to-text dictation entries -- the original WisprMCP surface.
+
+Key fields: `transcriptEntityId` (PK), `asrText`, `formattedText`, `editedText`,
+`serverFinalizedText`, `timestamp`, `app`, `url`, `duration`, `numWords`, `status`,
+`language`, `detectedLanguage`, `conversationId`, `isArchived`, `additionalContext`
+(JSON), `averageLogProb`, `e2eLatency`.
+
+Also present: `audio`/`builtInAudio`/`screenshot` BLOBs, fallback-pipeline columns
+(`fallbackAsrText`, `usedFallbackAsr`, `fallbackLevel`, divergence scores),
+accessibility capture (`axText`, `axHTML`), `toneMatchedText`, `opusChunks`,
+`personalizationStyleSettings`, `numDictionaryReplacements`, `editedTextUnbounded`.
+
+### Dictionary
+Custom phrases and snippet replacements.
+
+Fields: `id` (PK), `phrase`, `replacement`, `replacementHtml`, `frequencyUsed`,
+`remoteFrequencyUsed`, `lastUsed`, `manualEntry`, `source`, `observedSource`,
+`isSnippet`, `isStarred`, `teamDictionaryId`, `createdAt`, `modifiedAt`,
+`isDeleted`. Unique on (`phrase`, `teamDictionaryId`).
+
+> **Schema drift, load-bearing:** `frequencySeen` and `lastSeen` were documented by
+> earlier versions of this file and **no longer exist**. A hardcoded SELECT naming
+> them fails with `no such column`. Queries in `parser.py` resolve columns at
+> runtime via `PRAGMA table_info` for exactly this reason.
+
+### Polish, InstructHistory, InstructChatSession, FlowLensHistory
+Text-transform features (polish/instruct/lens). `Polish` carries
+`polishInitialText`, `polishedText`, `instruction`, `promptName`, `modelVersion`,
+`diffCount`, `polishUndone`. Not yet surfaced by this connector.
+
+## Meetings surface
+
+### Meetings
+One row per recorded meeting.
+
+Identity and lifecycle: `id` (PK), `title`, `createdAt`, `modifiedAt`,
+`endedAt` (**epoch ms**), `finalized`, `isDeleted`, `isTourDemo`, `importSource`,
+`refineStatus` (`complete` when the server refine pipeline finished),
+`refineRetries`, `refineUploadFailureReason`, `transcriptDeletedAt`.
+
+Content:
+- `summary` (TEXT) -- **the AI-generated meeting summary, markdown**, stored
+  locally. This is the same summary the app shows; it does not require the hosted
+  API.
+- `notes` (TEXT) -- the user's own "My Thoughts" text.
+- `speakerMap` (JSON) -- see below.
+- `participantNames` (TEXT) -- often NULL; prefer `speakerMap`.
+
+Sharing and sync: `shareSlug`, `shareVisibility`, `audioUploadedAt`,
+`liveTranscriptUploadedAt`, `speakerArtifactUploadedAt`, `serverRefinedUploadedAt`,
+`refinedFetchedThroughAt`, and the `*PendingPush` flags.
+
+Calendar link: `calendarEventExternalId`, `calendarOccurrenceStartAtUtc`.
+
+#### speakerMap
+Resolves the numeric diarization ids in the NDJSON to people:
+
+```json
+{
+  "people": {
+    "<personId>": {"name": "Dustin Fay", "origin": "self",
+                   "platform": null, "participantId": null, "contactId": null}
+  },
+  "assignments": {
+    "1": {"consensus": null, "user": "<personId>",
+          "mic": null, "dom": null, "llm": null}
+  }
+}
 ```
 
-### Dictionary Usage
+`assignments` is keyed by the NDJSON `speaker.id`. Resolution precedence is
+`consensus` → `user` → `mic` → `dom` → `llm`; unresolved ids fall back to
+`Speaker N`. `people` can contain entries with no assignment (a solo recording may
+have one `origin: "self"` person and an empty `assignments`).
+
+### MeetingVersions / NoteVersions
+Revision history for meeting notes and standalone notes: `content`, `source`,
+`transformId`, `transformPrompt`, `createdAt`.
+
+### TranscriptCorrections
+User edits to individual meeting transcript entries.
+
+Fields: `id` (PK), `meetingId` (FK, cascade), `entryId` (matches an NDJSON entry
+`id`), `originalText`, `editedText`, `artifactRevision`, `artifactDigest`.
+
+`entryId` is pinned to a specific artifact revision, so a correction usually
+matches the `refined.ndjson` entry ids rather than `live.ndjson`.
+
+### NDJSON artifact format
+
+`live.ndjson` opens with a meta line, then mixes utterances and markers:
+
+```json
+{"meta":{"v":3,"clock":"recording_active_ms"}}
+{"id":"0b34b1fc-…","timestamp":"0:01","text":"There's, like, more nuance here.",
+ "speaker":{"id":1,"source":"mic","name":null},
+ "startEpochMs":1787760388534,"endEpochMs":1787760389614,
+ "startRecordingMs":2578,"endRecordingMs":3658,"segment":0}
+{"id":"marker-1787761185364-paused","timestamp":"10:19 AM",
+ "marker":"paused","epochMs":1787761185364,"segment":0}
+```
+
+`refined.ndjson` has no meta line, no epoch fields, and coalesces utterances:
+
+```json
+{"id":"022cb3cf-…","timestamp":"00:00",
+ "text":"There's, like, more nuance here. There are some endpoints that are more clear.",
+ "speaker":{"id":1,"source":"refined","name":null}}
+```
+
+Consequences for readers:
+- `speaker.name` is always null in practice; names come from `speakerMap`.
+- Refined entries carry only a `mm:ss` (or `h:mm:ss`) display offset, so duration
+  must be derived from those offsets rather than epoch fields.
+- Marker `timestamp` values are wall-clock (`"10:19 AM"`), not offsets.
+- Line kinds must be dispatched on shape (`meta` / `marker` / `text`); unknown
+  kinds should be skipped, not guessed at.
+
+## Notes, todos, chats, calendar
+
+### Notes
+Standalone notes: `id` (PK), `title`, `content`, `contentPreview`,
+`searchableContent`, `createdAt`, `modifiedAt`, `pinned`, `finalized`, `synced`,
+`isDeleted`.
+
+### NoteImages
+Images embedded in notes: `data` (BLOB), `width`, `height`, `sizeBytes`, `s3Key`,
+`contentType`, `uploadedToS3`, `presignedGetUrl`, `urlExpiresAt`. This connector
+reports image counts only and never reads the BLOBs or the presigned URLs.
+
+### SharedNotes
+Notes shared by slug: `slug` (PK), `title`, `notes`, `summary`,
+`searchableContent`, `ownerEmail`, `ownerFirstName`, `ownerLastName`,
+`ownerAvatarUrl`, `callerRole` (`viewer` by default).
+
+### Todos
+Action items: `id` (PK), `meetingId` (nullable, no FK constraint), `title`,
+`status` (default `open`), `isDeleted`, `isArchived`, `sortOrder`, `synced`.
+
+### NotetakerChats / NotetakerChatMessages / NotetakerChatAgentStates
+AI chat threads about a meeting.
+
+`NotetakerChats`: `id` (PK), `userId`, `kind` (e.g. `meeting_chat`), `meetingId`,
+`title` (first user turn, truncated), `uploadState`, `lastAccessedAt`, `deletedAt`,
+`shareNote`.
+
+`NotetakerChatMessages`: `id` (PK), `chatId` (FK, cascade), `role`
+(`user`/`assistant`), `status` (e.g. `succeeded`), `localOrder`, `serverSequence`,
+`turnId`, `content` (JSON), `metadata` (JSON), `feedback` (JSON).
+
+`content` shape -- text lives in a block list, so it must be walked, not read as a
+string:
+
+```json
+{"type":"message","role":"assistant",
+ "content":[{"type":"text","text":"…"}]}
+```
+
+`metadata` carries `{"kind":"meeting","model":"gpt-5.6-sol","latency_ms":8355}`.
+
+`NotetakerChatAgentStates` holds the agent `trajectory` (JSON) per chat; not
+surfaced by this connector.
+
+### CalendarEvents
+Synced calendar entries with AI pre-read briefings.
+
+Fields: `externalId` (PK), `title`, `startAtUtc`/`endAtUtc` (**epoch ms**),
+`conferenceUrl`, `status`, `participantNames`, `participants`, `prereadTitle`,
+`prereadContent`, `prereadSummary`, `prereadDispatchedAt`, `selfResponseStatus`,
+`colorId`, `connectorKey` (default `calendar`), `updatedAt`, `syncedAt`.
+
+## Other tables
+
+| Table | Purpose | Read by connector |
+|-------|---------|-------------------|
+| `Links` | Copied-URL history with title enrichment | No |
+| `Automations` | Automation rules keyed by `entityKind`/`entityId` | No |
+| `UserContext` | Writing samples and polish prompts | No |
+| `UserVoicePreferences` | Voice/style preferences | No |
+| `RemoteNotifications` | In-app notifications from the service | No |
+| `GranolaImportRun`, `GranolaTranscriptQueue` | Granola import pipeline | No |
+| `SequelizeMeta` | Migration ledger | No (excluded from drift checks) |
+
+## Timestamp formats
+
+Three different conventions coexist -- mixing them silently produces wrong results:
+
+| Form | Example | Where |
+|------|---------|-------|
+| Text, UTC-suffixed | `2026-08-27 18:00:28.160 +00:00` | `createdAt`, `modifiedAt`, `timestamp`, `deletedAt` |
+| Epoch milliseconds | `1787853631865` | `endedAt`, `startAtUtc`, `endAtUtc`, `*EpochMs`, `submitAcceptedAt` |
+| Display offset | `"0:01"`, `"00:07"`, `"1:02:33"` | NDJSON `timestamp` |
+
+Two consequences the parser handles explicitly:
+
+1. **Naive/aware mixing.** Epoch-ms values decoded naively and text values decoded
+   as UTC-aware cannot be subtracted. All datetimes are normalized to UTC-aware.
+2. **Date-bound comparisons.** Text timestamps are space-separated, so comparing
+   them against `datetime.isoformat()` (`T`-separated) is not a valid lexicographic
+   comparison -- `"T"` sorts above `" "`. Bounds are emitted as
+   `%Y-%m-%d %H:%M:%S` so the comparison is a correct prefix compare.
+
+## Sample queries
+
+Meetings that have an AI summary, newest first:
+
 ```sql
-SELECT 
-    phrase,
-    frequencyUsed,
-    manualEntry,
-    source,
-    lastUsed
-FROM Dictionary 
+SELECT id, title, createdAt, refineStatus, length(summary) AS summary_len
+FROM Meetings
+WHERE (isDeleted = 0 OR isDeleted IS NULL)
+  AND summary IS NOT NULL AND TRIM(summary) != ''
+ORDER BY createdAt DESC;
+```
+
+Chat threads with their meeting title and turn count:
+
+```sql
+SELECT c.id, c.title, m.title AS meeting, COUNT(msg.id) AS turns
+FROM NotetakerChats c
+LEFT JOIN Meetings m ON m.id = c.meetingId
+LEFT JOIN NotetakerChatMessages msg ON msg.chatId = c.id
+WHERE c.deletedAt IS NULL
+GROUP BY c.id
+ORDER BY c.lastAccessedAt DESC;
+```
+
+Open action items with their source meeting:
+
+```sql
+SELECT t.title, t.status, m.title AS meeting
+FROM Todos t
+LEFT JOIN Meetings m ON m.id = t.meetingId
+WHERE t.status = 'open'
+  AND (t.isDeleted = 0 OR t.isDeleted IS NULL)
+  AND (t.isArchived = 0 OR t.isArchived IS NULL)
+ORDER BY t.sortOrder;
+```
+
+Dictionary entries (runtime-safe column set):
+
+```sql
+SELECT phrase, replacement, frequencyUsed, lastUsed, isSnippet, isStarred
+FROM Dictionary
+WHERE isDeleted = 0 OR isDeleted IS NULL
 ORDER BY frequencyUsed DESC, lastUsed DESC;
 ```
 
-### Daily Activity
-```sql
-SELECT 
-    DATE(timestamp) as date,
-    COUNT(*) as transcriptions,
-    SUM(duration) as total_duration,
-    SUM(numWords) as total_words
-FROM History 
-GROUP BY DATE(timestamp) 
-ORDER BY date DESC;
-```
+## Privacy notes
 
-### Quality Metrics
-```sql
-SELECT 
-    status,
-    COUNT(*) as count,
-    AVG(formattingDivergenceScore) as avg_formatting_score,
-    AVG(averageLogProb) as avg_confidence
-FROM History 
-WHERE status = 'formatted'
-GROUP BY status;
-```
-
-### Text Processing Pipeline Analysis
-```sql
-SELECT 
-    COUNT(*) as total,
-    COUNT(CASE WHEN asrText IS NOT NULL THEN 1 END) as has_asr,
-    COUNT(CASE WHEN formattedText IS NOT NULL THEN 1 END) as has_formatted,
-    COUNT(CASE WHEN editedText IS NOT NULL THEN 1 END) as has_edited,
-    COUNT(CASE WHEN usedFallbackAsr = 1 THEN 1 END) as used_fallback_asr,
-    COUNT(CASE WHEN usedFallbackFormatting = 1 THEN 1 END) as used_fallback_formatting
-FROM History;
-```
-
-## Data Insights
-
-### Audio Processing Pipeline
-1. **ASR Stage**: Raw audio → `asrText` (speech recognition)
-2. **Formatting Stage**: `asrText` → `formattedText` (AI formatting)
-3. **Editing Stage**: `formattedText` → `editedText` (user edits)
-4. **Fallback System**: Alternative ASR/formatting when primary fails
-
-### Context Awareness
-- **Accessibility Integration**: `axText`, `axHTML` for screen reader context
-- **Application Context**: Active app, URL, textbox contents
-- **User Context**: Name, email, conversation history
-- **Visual Context**: Screenshots, OCR results
-
-### Quality Assurance
-- **Confidence Scoring**: `averageLogProb` for ASR confidence
-- **Divergence Metrics**: Score differences between processing stages
-- **Latency Tracking**: End-to-end processing time measurement
-
-### Privacy Considerations
-- Audio data stored as BLOBs in database
-- Screenshots captured and stored
-- User personal information in context data
-- Conversation tracking across sessions
-
-## Technical Notes
-
-- **Database Engine**: SQLite with Sequelize ORM
-- **JSON Support**: Both JSON and JSONB column types used
-- **Soft Deletes**: `isDeleted` flags instead of hard deletes
-- **Sync Architecture**: `synced` flags suggest cloud synchronization
-- **Backup Strategy**: Automated timestamped backups in `backups/` directory
-- **Performance**: Strategic indexing on frequently queried columns
+The database holds audio and screenshot BLOBs, accessibility text captured from
+whatever app was focused, note images, and presigned S3 URLs. Meeting directories
+hold full recorded audio. This connector reads text and metadata only: it never
+returns BLOB contents, audio bytes, or presigned URLs, and it reports audio merely
+as an availability flag.

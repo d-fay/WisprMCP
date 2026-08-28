@@ -103,6 +103,38 @@ WisprMCP provides programmatic access to your Wispr Flow local database, enablin
 - Runtime column resolution, so a Wispr Flow schema migration degrades instead of
   raising `no such column`
 - Token-aware transcript output: `text` (default), `markdown`, or capped `json`
+- Serves an **MCP App** (`ui://`) view for meeting transcripts — see below
+
+### 🖼️ MCP App view (SEP-1865)
+
+`get_meeting_transcript` declares a `ui://wispr/transcript` resource, so a host
+that supports the `io.modelcontextprotocol/ui` extension renders the transcript as
+an interactive view — per-speaker filtering, text search, and inline display of
+user corrections — instead of a wall of JSON.
+
+The view is a single self-contained HTML file
+(`wispr_mcp/mcp/ui/transcript.html`) with **zero dependencies and no network
+requests**, so it cannot fail on a CDN. It declares its own fallbacks for every CSS
+variable and keys light/dark off the host's reported `theme`.
+
+The model and the view get different payloads, which is the point:
+
+| | Goes to | Contents |
+|---|---|---|
+| `content` | model context | the compact `text`/`markdown`/capped-`json` form |
+| `structuredContent` | the view only | every entry, speakers, per-speaker breakdown, markers |
+
+So asking for `format="text"` keeps the model's context small while the view still
+renders all 100+ entries.
+
+**Enabling it is host-side, not server-side.** In Kiro Crew the server must be
+routed through the MCP gateway (**Developer → MCP Management**, or
+`mcp_gateway.stub_servers`), because the gateway is what intercepts the result and
+resolves the `ui://` resource. Without that you get the tool's text with no error.
+Note that routing a server restarts active sessions.
+
+Hosts with no MCP Apps support ignore the metadata entirely and the tool behaves
+exactly as before, so the declaration is safe unconditionally.
 
 ## Installation
 

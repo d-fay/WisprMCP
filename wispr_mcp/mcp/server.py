@@ -10,11 +10,13 @@ import argparse
 
 try:
     from .tools import WisprTools
+    from .apps import list_ui_resources, read_ui_resource
 except ImportError:
     # Handle running as standalone script
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
     from wispr_mcp.mcp.tools import WisprTools
+    from wispr_mcp.mcp.apps import list_ui_resources, read_ui_resource
 
 
 class MCPServer:
@@ -37,6 +39,10 @@ class MCPServer:
                 return self._handle_tools_list(request_id)
             elif method == "tools/call":
                 return self._handle_tools_call(request_id, params)
+            elif method == "resources/list":
+                return self._handle_resources_list(request_id)
+            elif method == "resources/read":
+                return self._handle_resources_read(request_id, params)
             elif method == "ping":
                 return self._handle_ping(request_id)
             else:
@@ -59,8 +65,9 @@ class MCPServer:
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
                     "tools": {},
-                    "resources": {},
-                    "prompts": {},
+                    # Declared because resources/list and resources/read are
+                    # now implemented; they serve the ui:// app views.
+                    "resources": {"listChanged": False},
                     "logging": {}
                 },
                 "serverInfo": {
@@ -95,16 +102,61 @@ class MCPServer:
         if "error" in result:
             return self._error_response(request_id, -32603, result["error"])
         
+        # A tool may attach data meant for a ui:// view rather than the model.
+        # SEP-1865 carries that in structuredContent, which hosts pass to the
+        # app and keep out of model context; the text below stays the model's
+        # view of the result.
+        structured = result.pop("_ui_structured", None)
+        
+        payload: Dict[str, Any] = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(result, indent=2, default=str)
+                }
+            ]
+        }
+        if structured is not None:
+            payload["structuredContent"] = structured
+        
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": payload
+        }
+    
+    def _handle_resources_list(self, request_id: Any) -> Dict[str, Any]:
+        """Handle resources/list request (ui:// app views)."""
         return {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps(result, indent=2, default=str)
-                    }
-                ]
+                "resources": list_ui_resources()
+            }
+        }
+    
+    def _handle_resources_read(self, request_id: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle resources/read request (ui:// app views)."""
+        uri = params.get("uri")
+        
+        if not uri:
+            return self._error_response(request_id, -32602, "Missing resource uri")
+        
+        try:
+            contents = read_ui_resource(uri)
+        except OSError as e:
+            return self._error_response(
+                request_id, -32603, f"Could not read resource {uri}: {e}"
+            )
+        
+        if contents is None:
+            return self._error_response(request_id, -32602, f"Unknown resource: {uri}")
+        
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "contents": [contents]
             }
         }
     

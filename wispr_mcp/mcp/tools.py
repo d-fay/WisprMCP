@@ -7,6 +7,7 @@ import json
 
 from ..core.parser import WisprParser
 from ..utils.date_parser import DateParser
+from .apps import TRANSCRIPT_URI
 
 
 class WisprTools:
@@ -408,6 +409,16 @@ class WisprTools:
                         }
                     },
                     "required": ["meeting_id"]
+                },
+                # SEP-1865: name the ui:// view on the tool definition. Hosts
+                # harvest this at connection time, which is why it works even
+                # for results that carry no per-result _meta. Hosts without
+                # MCP Apps support ignore it and get the text output.
+                "_meta": {
+                    "ui": {
+                        "resourceUri": TRANSCRIPT_URI,
+                        "visibility": ["model", "app"]
+                    }
                 }
             },
             {
@@ -1159,14 +1170,26 @@ class WisprTools:
             "corrections_applied": transcript.corrections_applied,
         }
         
+        # Payload for a ui:// view. Carries every entry regardless of the
+        # format/max_entries the model asked for, because the view renders it
+        # for a human and structuredContent is kept out of model context.
+        structured = {
+            **header,
+            "speaker_breakdown": transcript.speaker_breakdown,
+            "entries": [entry.to_dict() for entry in transcript.entries],
+            "markers": [marker.to_dict() for marker in transcript.markers],
+        }
+        
         if format == "text":
-            return {**header, "transcript": transcript.full_text}
+            return {**header, "transcript": transcript.full_text,
+                    "_ui_structured": structured}
         
         if format == "markdown":
             return {
                 **header,
                 "transcript": f"# {meeting.title or 'Untitled meeting'}\n\n"
                               + transcript.to_markdown(),
+                "_ui_structured": structured,
             }
         
         payload = transcript.to_dict()
@@ -1175,7 +1198,8 @@ class WisprTools:
             payload["truncated"] = True
             payload["entries_returned"] = max_entries
         
-        return {**header, "title": meeting.title, **payload}
+        return {**header, "title": meeting.title, **payload,
+                "_ui_structured": structured}
     
     def _search_meetings(self, query: str, search_transcripts: bool = False,
                          since: Optional[str] = None, until: Optional[str] = None,

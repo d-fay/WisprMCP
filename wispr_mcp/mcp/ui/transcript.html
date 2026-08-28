@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<!--
+  WisprMCP meeting-transcript view (SEP-1865 / io.modelcontextprotocol/ui).
+
+  Zero dependencies on purpose. The host CSP permits https://esm.sh, but a CDN
+  that fails to load yields a blank frame with no error, so nothing is fetched.
+
+  Host deviations this app is written against (Kiro Crew, Stable 2026-01-26):
+    * No sandbox proxy -- single null-origin iframe. The sandbox-* notifications
+      are never sent, so ui/initialize is the only entry point.
+    * hostContext.styles.variables is NOT sent, so every CSS variable below
+      declares its own fallback and light/dark keys off hostContext.theme.
+    * No storage, no cookies. Unmounting reloads, so no state is cached here.
+    * ui/message and ui/update-model-context are unavailable: this is a viewer,
+      selections cannot be pushed back into model context.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Meeting transcript</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg:            light-dark(#ffffff, #171717);
+    --bg-alt:        light-dark(#f6f6f7, #1f1f21);
+    --bg-hover:      light-dark(#eeeef0, #27272a);
+    --text:          light-dark(#171717, #fafafa);
+    --text-dim:      light-dark(#5f6368, #a1a1aa);
+    --text-faint:    light-dark(#8a8f98, #71717a);
+    --border:        light-dark(#e2e2e5, #2e2e32);
+    --accent:        light-dark(#2563eb, #60a5fa);
+    --warn-bg:       light-dark(#fff7ed, #2a1f14);
+    --warn-border:   light-dark(#fdba74, #7c4a1a);
+    --radius:        8px;
+    --font: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  /* Explicit override for hosts that report theme but where light-dark() is
+     not honoured by the engine. */
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"]  { color-scheme: dark; }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px;
+    background: var(--bg); color: var(--text);
+    font-family: var(--font); font-size: 13px; line-height: 1.5;
+  }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; margin-bottom: 10px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  .meta { color: var(--text-dim); font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .meta b { font-weight: 600; color: var(--text); }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+  .chip {
+    border: 1px solid var(--border); background: var(--bg-alt); color: var(--text);
+    border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+    font-family: inherit; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .chip:hover { background: var(--bg-hover); }
+  .chip[aria-pressed="false"] { opacity: .45; }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .chip .n { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  input[type="search"] {
+    flex: 1 1 160px; min-width: 120px;
+    border: 1px solid var(--border); background: var(--bg-alt); color: var(--text);
+    border-radius: var(--radius); padding: 4px 8px; font: inherit;
+  }
+  input[type="search"]:focus-visible, .chip:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+
+  ol { list-style: none; margin: 0; padding: 0; }
+  li {
+    display: grid; grid-template-columns: 52px 1fr; gap: 10px;
+    padding: 5px 6px; border-radius: var(--radius);
+  }
+  li:hover { background: var(--bg-alt); }
+  .t {
+    color: var(--text-faint); font-family: var(--mono); font-size: 11px;
+    padding-top: 2px; font-variant-numeric: tabular-nums;
+  }
+  .who { font-weight: 600; }
+  .corrected {
+    background: var(--warn-bg);
+    border-left: 2px solid var(--warn-border);
+    padding-left: 6px; margin-left: -8px;
+  }
+  .orig {
+    display: block; color: var(--text-dim); font-size: 12px; margin-top: 2px;
+  }
+  .orig s { text-decoration-color: var(--warn-border); }
+  mark { background: var(--accent); color: var(--bg); border-radius: 2px; padding: 0 1px; }
+  .empty, .status { color: var(--text-dim); padding: 16px 6px; font-style: italic; }
+  footer { margin-top: 10px; color: var(--text-faint); font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="root"><p class="status">Waiting for transcript…</p></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---- JSON-RPC over postMessage ------------------------------------------
+  let nextId = 1;
+  const pending = new Map();
+  const notifyHandlers = new Map();
+
+  function send(msg) { window.parent.postMessage(msg, "*"); }
+
+  function request(method, params) {
+    const id = nextId++;
+    send({ jsonrpc: "2.0", id, method, params });
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  }
+
+  function notify(method, params) {
+    send({ jsonrpc: "2.0", method, params });
+  }
+
+  function onNotify(method, fn) { notifyHandlers.set(method, fn); }
+
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data || data.jsonrpc !== "2.0") return;
+
+    if (data.id !== undefined && pending.has(data.id)) {
+      const { resolve, reject } = pending.get(data.id);
+      pending.delete(data.id);
+      if (data.error) reject(new Error(data.error.message || "rpc error"));
+      else resolve(data.result);
+      return;
+    }
+    // A request id we do not recognise is not ours to answer; ignore quietly
+    // rather than replying, so the host is never confused by a stray response.
+    if (data.method && notifyHandlers.has(data.method)) {
+      notifyHandlers.get(data.method)(data.params || {});
+    }
+  });
+
+  // ---- state ---------------------------------------------------------------
+  const state = {
+    title: null, source: null, speakers: [], entries: [],
+    breakdown: {}, duration: null, corrections: 0,
+    hidden: new Set(), query: "",
+  };
+
+  const PALETTE = ["#2563eb", "#16a34a", "#db2777", "#d97706", "#7c3aed", "#0891b2"];
+  const colorFor = (name) => {
+    const i = state.speakers.indexOf(name);
+    return PALETTE[(i < 0 ? 0 : i) % PALETTE.length];
+  };
+
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function highlight(text) {
+    const q = state.query.trim();
+    if (!q) return esc(text);
+    const safe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return esc(text).replace(new RegExp(safe, "gi"), (m) => `<mark>${m}</mark>`);
+  }
+
+  function fmtClock(seconds) {
+    if (seconds == null || !isFinite(seconds)) return "";
+    const s = Math.max(0, Math.round(seconds));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const mm = String(m).padStart(h ? 2 : 1, "0");
+    return (h ? `${h}:` : "") + `${mm}:${String(sec).padStart(2, "0")}`;
+  }
+
+  // ---- render --------------------------------------------------------------
+  function render() {
+    const root = document.getElementById("root");
+
+    if (!state.entries.length) {
+      root.innerHTML = `<p class="empty">No transcript entries were returned.</p>`;
+      reportSize();
+      return;
+    }
+
+    const q = state.query.trim().toLowerCase();
+    const visible = state.entries.filter((e) => {
+      const who = e.speaker_name || "Unknown speaker";
+      if (state.hidden.has(who)) return false;
+      if (q && !(e.text || "").toLowerCase().includes(q)) return false;
+      return true;
+    });
+
+    const words = state.entries.reduce((n, e) => n + (e.num_words || 0), 0);
+    const bits = [];
+    if (state.source) bits.push(`<span><b>${esc(state.source)}</b> artifact</span>`);
+    bits.push(`<span><b>${state.entries.length}</b> entries</span>`);
+    bits.push(`<span><b>${words}</b> words</span>`);
+    if (state.duration) bits.push(`<span><b>${fmtClock(state.duration)}</b></span>`);
+    if (state.corrections) bits.push(`<span><b>${state.corrections}</b> corrected</span>`);
+
+    const chips = state.speakers.map((name) => {
+      const on = !state.hidden.has(name);
+      const stats = state.breakdown[name] || {};
+      return `<button class="chip" aria-pressed="${on}" data-speaker="${esc(name)}"
+        style="color:${colorFor(name)}"><span class="dot"></span><span
+        style="color:var(--text)">${esc(name)}</span><span class="n">${stats.entries ?? ""}</span></button>`;
+    }).join("");
+
+    const rows = visible.map((e) => {
+      const who = e.speaker_name || "Unknown speaker";
+      const stamp = e.timestamp || fmtClock(e.offset_seconds);
+      const orig = e.is_corrected && e.original_text
+        ? `<span class="orig">was <s>${esc(e.original_text.trim())}</s></span>` : "";
+      return `<li${e.is_corrected ? ' class="corrected"' : ""}>
+        <span class="t">${esc(stamp)}</span>
+        <span><span class="who" style="color:${colorFor(who)}">${esc(who)}</span>
+        ${highlight(e.text || "")}${orig}</span></li>`;
+    }).join("");
+
+    const hiddenNote = visible.length !== state.entries.length
+      ? `<footer>Showing ${visible.length} of ${state.entries.length} entries.</footer>` : "";
+
+    root.innerHTML = `
+      <header>
+        <h1>${esc(state.title || "Meeting transcript")}</h1>
+        <div class="meta">${bits.join("")}</div>
+      </header>
+      <div class="controls">
+        ${chips}
+        <input type="search" placeholder="Filter transcript…" value="${esc(state.query)}"
+               aria-label="Filter transcript text">
+      </div>
+      ${rows ? `<ol>${rows}</ol>` : `<p class="empty">Nothing matches that filter.</p>`}
+      ${hiddenNote}`;
+
+    root.querySelectorAll("[data-speaker]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const who = btn.getAttribute("data-speaker");
+        state.hidden.has(who) ? state.hidden.delete(who) : state.hidden.add(who);
+        render();
+      });
+    });
+
+    const box = root.querySelector('input[type="search"]');
+    box.addEventListener("input", () => {
+      state.query = box.value;
+      const caret = box.selectionStart;
+      render();
+      const next = document.querySelector('#root input[type="search"]');
+      if (next) { next.focus(); next.setSelectionRange(caret, caret); }
+    });
+
+    reportSize();
+  }
+
+  // ---- host plumbing -------------------------------------------------------
+  function applyTheme(theme) {
+    if (theme === "light" || theme === "dark") {
+      document.documentElement.setAttribute("data-theme", theme);
+    }
+  }
+
+  function applyDimensions(dims) {
+    if (!dims) return;
+    const el = document.documentElement;
+    if ("height" in dims) el.style.height = "100vh";
+    else if (dims.maxHeight) el.style.maxHeight = `${dims.maxHeight}px`;
+    if ("width" in dims) el.style.width = "100%";
+    else if (dims.maxWidth) el.style.maxWidth = `${dims.maxWidth}px`;
+  }
+
+  let lastW = 0, lastH = 0;
+  function reportSize() {
+    const w = Math.ceil(document.documentElement.scrollWidth);
+    const h = Math.ceil(document.body.scrollHeight);
+    if (w === lastW && h === lastH) return;
+    lastW = w; lastH = h;
+    notify("ui/notifications/size-changed", { width: w, height: h });
+  }
+
+  function ingest(result) {
+    const s = (result && result.structuredContent) || null;
+    if (!s) return false;
+    state.title = s.title || state.title;
+    state.source = s.source || state.source;
+    state.entries = Array.isArray(s.entries) ? s.entries : [];
+    state.speakers = Array.isArray(s.speakers) && s.speakers.length
+      ? s.speakers
+      : [...new Set(state.entries.map((e) => e.speaker_name || "Unknown speaker"))];
+    state.breakdown = s.speaker_breakdown || {};
+    state.duration = s.duration ?? null;
+    state.corrections = s.corrections_applied || 0;
+    return true;
+  }
+
+  onNotify("ui/notifications/tool-result", (params) => {
+    if (ingest(params)) render();
+    else {
+      document.getElementById("root").innerHTML =
+        `<p class="empty">This result carried no structured transcript to render.</p>`;
+      reportSize();
+    }
+  });
+
+  onNotify("ui/notifications/host-context-changed", (params) => {
+    if (params.theme) applyTheme(params.theme);
+    if (params.containerDimensions) applyDimensions(params.containerDimensions);
+    reportSize();
+  });
+
+  // tool-input is informational here; the result carries everything we render.
+  onNotify("ui/notifications/tool-input", () => {});
+
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    clientInfo: { name: "wispr-transcript-view", version: "1.0.0" },
+    appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+  }).then((result) => {
+    const ctx = (result && result.hostContext) || {};
+    applyTheme(ctx.theme);
+    applyDimensions(ctx.containerDimensions);
+    notify("ui/notifications/initialized", {});
+    if (window.ResizeObserver) new ResizeObserver(reportSize).observe(document.body);
+    reportSize();
+  }).catch(() => {
+    // No host handshake (opened outside a host, or the host declined). Stay
+    // rendered so the frame is never blank.
+    notify("ui/notifications/initialized", {});
+  });
+})();
+</script>
+</body>
+</html>

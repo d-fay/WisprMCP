@@ -7,7 +7,7 @@ import json
 
 from ..core.parser import WisprParser
 from ..utils.date_parser import DateParser
-from .apps import TRANSCRIPT_URI
+from .apps import MEETINGS_URI, TRANSCRIPT_URI
 
 
 class WisprTools:
@@ -321,6 +321,16 @@ class WisprTools:
                             "description": "Include full summary and notes text for each meeting (larger response)",
                             "default": False
                         }
+                    }
+                },
+                # SEP-1865: the meeting-index view. It reads the index rows from
+                # structuredContent and fetches a selected meeting's summary
+                # itself via the host's serverTools capability, so drilling down
+                # costs no model context.
+                "_meta": {
+                    "ui": {
+                        "resourceUri": MEETINGS_URI,
+                        "visibility": ["model", "app"]
                     }
                 }
             },
@@ -1043,18 +1053,28 @@ class WisprTools:
             include_related_counts=True,
         )
         
+        rows = [
+            meeting.to_dict(include_content=include_content)
+            for meeting in meetings
+        ]
+        filters = {
+            "since": since,
+            "until": until,
+            "with_summary_only": with_summary_only,
+            "finalized_only": finalized_only,
+        }
+        
+        # Payload for the ui:// index view. The rows are the same ones the model
+        # sees; the view then loads a selected meeting's summary on demand via
+        # the host's serverTools capability rather than having every summary
+        # shipped up front.
+        structured = {"meetings": rows, "count": len(rows), "filters": filters}
+        
         return {
-            "meetings": [
-                meeting.to_dict(include_content=include_content)
-                for meeting in meetings
-            ],
+            "meetings": rows,
             "count": len(meetings),
-            "filters": {
-                "since": since,
-                "until": until,
-                "with_summary_only": with_summary_only,
-                "finalized_only": finalized_only,
-            },
+            "filters": filters,
+            "_ui_structured": structured,
         }
     
     def _get_meeting(self, meeting_id: str, include_transcript: bool = False,

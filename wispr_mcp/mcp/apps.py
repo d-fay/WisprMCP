@@ -24,6 +24,7 @@ APP_MIME_TYPE = "text/html;profile=mcp-app"
 UI_DIR = Path(__file__).parent / "ui"
 
 TRANSCRIPT_URI = "ui://wispr/transcript"
+MEETINGS_URI = "ui://wispr/meetings"
 
 
 class UIResource:
@@ -74,6 +75,20 @@ UI_RESOURCES: Dict[str, UIResource] = {
         ),
         filename="transcript.html",
         # No external origins: the view is zero-dependency and fetches nothing.
+        csp={"resourceDomains": [], "frameDomains": [], "baseUriDomains": []},
+    ),
+    MEETINGS_URI: UIResource(
+        uri=MEETINGS_URI,
+        name="Meeting index",
+        description=(
+            "Index of recorded meetings with title, date, duration, speakers and "
+            "artifact availability, and a drill-down that loads a selected "
+            "meeting's AI summary and user notes on demand."
+        ),
+        filename="meetings.html",
+        # The view fetches its own detail through the host's serverTools
+        # capability (an in-host tools/call), never over the network, so it
+        # still needs no external origins.
         csp={"resourceDomains": [], "frameDomains": [], "baseUriDomains": []},
     ),
 }

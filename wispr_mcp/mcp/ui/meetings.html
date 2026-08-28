@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<!--
+  WisprMCP meeting-index view (SEP-1865 / io.modelcontextprotocol/ui).
+
+  An index of recorded meetings with a summary drill-down. The index rows arrive
+  in structuredContent; the summary for a selected meeting is fetched lazily by
+  the view itself through the host's serverTools capability (tools/call ->
+  get_meeting_summary), so browsing costs no model context and scales past the
+  handful of rows a text response can carry.
+
+  Zero dependencies on purpose. The host CSP permits https://esm.sh, but a CDN
+  that fails to load yields a blank frame with no error, so nothing is fetched.
+
+  Host deviations this app is written against (Kiro Crew, Stable 2026-01-26):
+    * No sandbox proxy -- single null-origin iframe. The sandbox-* notifications
+      are never sent, so ui/initialize is the only entry point.
+    * hostContext.styles.variables is NOT sent, so every CSS variable below
+      declares its own fallback and light/dark keys off hostContext.theme.
+    * No storage, no cookies. Unmounting reloads, so no state is cached here.
+    * ui/message and ui/update-model-context are unavailable: this is a viewer,
+      a selection cannot be pushed back into model context. Nothing in this UI
+      pretends otherwise -- every control only changes what is displayed.
+    * App-initiated tools/call IS available and schema-validated by the host,
+      so arguments must satisfy the tool's inputSchema exactly.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Meetings</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg:            light-dark(#ffffff, #171717);
+    --bg-alt:        light-dark(#f6f6f7, #1f1f21);
+    --bg-hover:      light-dark(#eeeef0, #27272a);
+    --bg-sel:        light-dark(#e7effd, #1e2a3d);
+    --text:          light-dark(#171717, #fafafa);
+    --text-dim:      light-dark(#5f6368, #a1a1aa);
+    --text-faint:    light-dark(#8a8f98, #71717a);
+    --border:        light-dark(#e2e2e5, #2e2e32);
+    --accent:        light-dark(#2563eb, #60a5fa);
+    --danger:        light-dark(#b42318, #fca5a5);
+    --radius:        8px;
+    --font: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  /* Explicit override for hosts that report theme but where light-dark() is
+     not honoured by the engine. */
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"]  { color-scheme: dark; }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 12px;
+    background: var(--bg); color: var(--text);
+    font-family: var(--font); font-size: 13px; line-height: 1.5;
+  }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; margin-bottom: 10px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  .meta { color: var(--text-dim); font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .meta b { font-weight: 600; color: var(--text); }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+  input[type="search"] {
+    flex: 1 1 180px; min-width: 120px;
+    border: 1px solid var(--border); background: var(--bg-alt); color: var(--text);
+    border-radius: var(--radius); padding: 4px 8px; font: inherit;
+  }
+  .chip {
+    border: 1px solid var(--border); background: var(--bg-alt); color: var(--text);
+    border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+    font-family: inherit;
+  }
+  .chip:hover { background: var(--bg-hover); }
+  .chip[aria-pressed="false"] { opacity: .45; }
+  input[type="search"]:focus-visible, .chip:focus-visible, .row:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+
+  .panes { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 12px; align-items: start; }
+  @media (max-width: 640px) { .panes { grid-template-columns: 1fr; } }
+
+  .list { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .row {
+    display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--border);
+    background: transparent; color: var(--text); font: inherit; padding: 7px 9px; cursor: pointer;
+  }
+  .row:last-child { border-bottom: 0; }
+  .row:hover { background: var(--bg-alt); }
+  .row[aria-current="true"] { background: var(--bg-sel); }
+  .row .t { font-weight: 600; display: block; }
+  .row .s { color: var(--text-faint); font-size: 11px; display: block; margin-top: 1px; }
+  .tags { display: inline-flex; gap: 5px; margin-left: 6px; }
+  .tag {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 0 3px;
+  }
+
+  .detail { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; min-height: 160px; }
+  .detail h2 { font-size: 14px; margin: 0 0 6px; }
+  .who { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  .who span {
+    font-size: 11px; background: var(--bg-alt); border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 8px;
+  }
+  .md h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+           color: var(--text-dim); margin: 14px 0 5px; }
+  .md h2 { font-size: 13px; margin: 14px 0 5px; }
+  .md p { margin: 6px 0; }
+  .md ul { margin: 5px 0; padding-left: 18px; }
+  .md li { margin: 2px 0; }
+  .md code { font-family: var(--mono); font-size: 12px; background: var(--bg-alt);
+             border-radius: 3px; padding: 0 3px; }
+  .notes { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .notes h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+              color: var(--text-dim); margin: 0 0 5px; }
+  .preview ol { list-style: none; margin: 6px 0 0; padding: 0; }
+  .preview li { display: grid; grid-template-columns: 46px 1fr; gap: 8px; padding: 3px 0; }
+  .preview .ts { color: var(--text-faint); font-family: var(--mono); font-size: 11px; }
+  .preview .sp { font-weight: 600; }
+  button.act {
+    border: 1px solid var(--border); background: var(--bg-alt); color: var(--text);
+    border-radius: var(--radius); padding: 4px 10px; font: inherit; cursor: pointer; margin-top: 12px;
+  }
+  button.act:hover { background: var(--bg-hover); }
+  button.act[disabled] { opacity: .5; cursor: default; }
+  .empty, .status { color: var(--text-dim); font-style: italic; }
+  .err { color: var(--danger); }
+  footer { margin-top: 10px; color: var(--text-faint); font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="root"><p class="status">Waiting for meetings…</p></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---- JSON-RPC over postMessage ------------------------------------------
+  let nextId = 1;
+  const pending = new Map();
+  const notifyHandlers = new Map();
+  const RPC_TIMEOUT_MS = 20000;
+
+  function send(msg) { window.parent.postMessage(msg, "*"); }
+
+  function request(method, params) {
+    const id = nextId++;
+    // Register BEFORE sending: a host that replies synchronously must never
+    // find the entry missing.
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error("host did not answer " + method));
+      }, RPC_TIMEOUT_MS);
+      pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      send({ jsonrpc: "2.0", id, method, params });
+    });
+  }
+
+  function notify(method, params) { send({ jsonrpc: "2.0", method, params }); }
+  function onNotify(method, fn) { notifyHandlers.set(method, fn); }
+
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (!data || data.jsonrpc !== "2.0") return;
+
+    if (data.id !== undefined && pending.has(data.id)) {
+      const { resolve, reject } = pending.get(data.id);
+      pending.delete(data.id);
+      if (data.error) reject(new Error(data.error.message || "rpc error"));
+      else resolve(data.result);
+      return;
+    }
+    // A request id we do not recognise is not ours to answer; ignore quietly
+    // rather than replying, so the host is never confused by a stray response.
+    if (data.method && notifyHandlers.has(data.method)) {
+      notifyHandlers.get(data.method)(data.params || {});
+    }
+  });
+
+  /** Call one of this server's own tools through the host. Returns the tool's
+   *  parsed payload: structuredContent when present, else the LAST text block
+   *  (this server puts a short digest first and the full payload last). */
+  async function callTool(name, args) {
+    const result = await request("tools/call", { name, arguments: args });
+    if (result && result.structuredContent) return result.structuredContent;
+    const blocks = (result && result.content) || [];
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      if (b && b.type === "text" && typeof b.text === "string") {
+        try { return JSON.parse(b.text); } catch { return { text: b.text }; }
+      }
+    }
+    throw new Error("tool returned no readable content");
+  }
+
+  // ---- state ---------------------------------------------------------------
+  const state = {
+    meetings: [], filters: null, selected: null, query: "",
+    onlySummary: false, onlyTranscript: false,
+    summaries: new Map(),   // id -> {loading} | {error} | {data}
+    previews: new Map(),    // id -> {loading} | {error} | {data}
+  };
+
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function fmtClock(seconds) {
+    if (seconds == null || !isFinite(seconds)) return "";
+    const s = Math.max(0, Math.round(seconds));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const mm = String(m).padStart(h ? 2 : 1, "0");
+    return (h ? `${h}:` : "") + `${mm}:${String(sec).padStart(2, "0")}`;
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d)) return String(iso).slice(0, 16).replace("T", " ");
+    return d.toLocaleString(undefined,
+      { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  }
+
+  // ---- a very small markdown subset ---------------------------------------
+  // Summaries use headings, bullets (one nesting level), paragraphs and the
+  // occasional inline emphasis. Everything is escaped BEFORE any markup is
+  // introduced, so no summary text can inject HTML.
+  function inline(text) {
+    return esc(text)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
+  }
+
+  function md(src) {
+    const lines = String(src || "").replace(/\r\n?/g, "\n").split("\n");
+    const out = [];
+    let para = [], listDepth = 0;
+
+    const closePara = () => {
+      if (para.length) { out.push(`<p>${inline(para.join(" "))}</p>`); para = []; }
+    };
+    const closeLists = (to = 0) => {
+      while (listDepth > to) { out.push("</ul>"); listDepth--; }
+    };
+
+    for (const raw of lines) {
+      const line = raw.replace(/\s+$/, "");
+      if (!line.trim()) { closePara(); closeLists(); continue; }
+
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        closePara(); closeLists();
+        const level = Math.min(3, Math.max(2, heading[1].length));
+        out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+        continue;
+      }
+
+      const bullet = line.match(/^(\s*)[-*+]\s+(.*)$/);
+      if (bullet) {
+        closePara();
+        const want = bullet[1].length >= 2 ? 2 : 1;
+        while (listDepth < want) { out.push("<ul>"); listDepth++; }
+        closeLists(want);
+        out.push(`<li>${inline(bullet[2])}</li>`);
+        continue;
+      }
+
+      closeLists();
+      para.push(line.trim());
+    }
+    closePara(); closeLists();
+    return out.join("");
+  }
+
+  // ---- data access ---------------------------------------------------------
+  function visible() {
+    const q = state.query.trim().toLowerCase();
+    return state.meetings.filter((m) => {
+      if (state.onlySummary && !m.has_summary) return false;
+      if (state.onlyTranscript && !m.has_transcript) return false;
+      if (!q) return true;
+      const hay = [m.title || "", ...(m.participants || [])].join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+  }
+
+  function byId(id) { return state.meetings.find((m) => m.meeting_id === id) || null; }
+
+  async function loadSummary(id) {
+    if (state.summaries.has(id)) return;
+    state.summaries.set(id, { loading: true });
+    render();
+    try {
+      const data = await callTool("get_meeting_summary", { meeting_id: id });
+      state.summaries.set(id, data && data.error ? { error: data.error } : { data });
+    } catch (e) {
+      state.summaries.set(id, { error: e.message || String(e) });
+    }
+    render();
+  }
+
+  async function loadPreview(id) {
+    if (state.previews.has(id)) return;
+    state.previews.set(id, { loading: true });
+    render();
+    try {
+      // format/max_entries are validated against the tool's inputSchema by the
+      // host, so they must stay within its declared enum and bounds.
+      const data = await callTool("get_meeting_transcript",
+        { meeting_id: id, format: "json", max_entries: 12 });
+      state.previews.set(id, data && data.error ? { error: data.error } : { data });
+    } catch (e) {
+      state.previews.set(id, { error: e.message || String(e) });
+    }
+    render();
+  }
+
+  function select(id) {
+    state.selected = id;
+    render();
+    loadSummary(id);
+  }
+
+  // ---- render --------------------------------------------------------------
+  function renderList(rows) {
+    if (!rows.length) return `<p class="empty">Nothing matches that filter.</p>`;
+    return `<div class="list">` + rows.map((m) => {
+      const on = m.meeting_id === state.selected;
+      const tags = [
+        m.has_summary ? "sum" : "", m.has_transcript ? "txt" : "",
+        m.has_notes ? "notes" : "", (m.chat_count || 0) > 0 ? "chat" : "",
+      ].filter(Boolean).map((t) => `<span class="tag">${t}</span>`).join("");
+      return `<button class="row" type="button" aria-current="${on}"
+                data-id="${esc(m.meeting_id)}">
+        <span class="t">${esc(m.title || "Untitled meeting")}</span>
+        <span class="s">${esc(fmtDate(m.created_at))}
+          ${m.duration ? "· " + esc(fmtClock(m.duration)) : ""}
+          ${(m.participants || []).length ? "· " + (m.participants || []).length + " speakers" : ""}
+          <span class="tags">${tags}</span></span>
+      </button>`;
+    }).join("") + `</div>`;
+  }
+
+  function renderPreview(id, m) {
+    const p = state.previews.get(id);
+    if (!m.has_transcript) return "";
+    if (!p) {
+      return `<button class="act" type="button" data-preview="${esc(id)}">
+        Preview transcript</button>`;
+    }
+    if (p.loading) return `<p class="status">Loading transcript…</p>`;
+    if (p.error) return `<p class="err">Could not load the transcript: ${esc(p.error)}</p>`;
+    const entries = (p.data.entries || []).slice(0, 12);
+    if (!entries.length) return `<p class="empty">This transcript has no entries.</p>`;
+    const total = p.data.entry_count || entries.length;
+    return `<div class="preview">
+      <h3>First ${entries.length} of ${total} entries</h3>
+      <ol>${entries.map((e) => `<li>
+        <span class="ts">${esc(e.timestamp || fmtClock(e.offset_seconds))}</span>
+        <span><span class="sp">${esc(e.speaker_name || "Unknown speaker")}</span>
+        ${esc(e.text || "")}</span></li>`).join("")}</ol>
+      <p class="empty">Call get_meeting_transcript for the full timeline view.</p>
+    </div>`;
+  }
+
+  function renderDetail() {
+    if (!state.selected) {
+      return `<p class="empty">Select a meeting to read its summary.</p>`;
+    }
+    const m = byId(state.selected);
+    if (!m) return `<p class="empty">That meeting is no longer in this list.</p>`;
+
+    const head = `<h2>${esc(m.title || "Untitled meeting")}</h2>
+      <div class="meta">
+        <span>${esc(fmtDate(m.created_at))}</span>
+        ${m.duration ? `<span><b>${esc(fmtClock(m.duration))}</b></span>` : ""}
+        ${m.correction_count ? `<span><b>${m.correction_count}</b> corrected</span>` : ""}
+        ${m.chat_count ? `<span><b>${m.chat_count}</b> notetaker chats</span>` : ""}
+      </div>
+      ${(m.participants || []).length
+        ? `<div class="who">${(m.participants || [])
+            .map((p) => `<span>${esc(p)}</span>`).join("")}</div>`
+        : ""}`;
+
+    const s = state.summaries.get(state.selected);
+    let body;
+    if (!m.has_summary && !s) {
+      body = `<p class="empty">This meeting has no AI summary.</p>`;
+    } else if (!s || s.loading) {
+      body = `<p class="status">Loading summary…</p>`;
+    } else if (s.error) {
+      body = `<p class="err">Could not load the summary: ${esc(s.error)}</p>`;
+    } else {
+      const d = s.data || {};
+      const summary = d.summary
+        ? `<div class="md">${md(d.summary)}</div>`
+        : `<p class="empty">This meeting has no AI summary.</p>`;
+      const notes = d.notes && String(d.notes).trim()
+        ? `<div class="notes"><h3>My thoughts</h3><div class="md">${md(d.notes)}</div></div>`
+        : "";
+      const flag = d.duplicate_sections_collapsed
+        ? `<footer>Duplicate sections in the cached summary were collapsed on read.</footer>`
+        : "";
+      body = summary + notes + flag;
+    }
+
+    return head + body + renderPreview(state.selected, m);
+  }
+
+  function render() {
+    const root = document.getElementById("root");
+
+    if (!state.meetings.length) {
+      root.innerHTML = `<p class="empty">No meetings were returned.</p>`;
+      reportSize();
+      return;
+    }
+
+    const rows = visible();
+    const withSummary = state.meetings.filter((m) => m.has_summary).length;
+    const bits = [
+      `<span><b>${state.meetings.length}</b> meetings</span>`,
+      `<span><b>${withSummary}</b> with a summary</span>`,
+    ];
+    if (rows.length !== state.meetings.length) {
+      bits.push(`<span>showing <b>${rows.length}</b></span>`);
+    }
+
+    root.innerHTML = `
+      <header>
+        <h1>Meetings</h1>
+        <div class="meta">${bits.join("")}</div>
+      </header>
+      <div class="controls">
+        <input type="search" placeholder="Filter by title or speaker…"
+               value="${esc(state.query)}" aria-label="Filter meetings">
+        <button class="chip" type="button" data-toggle="onlySummary"
+                aria-pressed="${state.onlySummary}">has summary</button>
+        <button class="chip" type="button" data-toggle="onlyTranscript"
+                aria-pressed="${state.onlyTranscript}">has transcript</button>
+      </div>
+      <div class="panes">
+        <div>${renderList(rows)}</div>
+        <div class="detail">${renderDetail()}</div>
+      </div>`;
+
+    root.querySelectorAll("[data-id]").forEach((btn) => {
+      btn.addEventListener("click", () => select(btn.getAttribute("data-id")));
+    });
+    root.querySelectorAll("[data-toggle]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.getAttribute("data-toggle");
+        state[key] = !state[key];
+        render();
+      });
+    });
+    const prev = root.querySelector("[data-preview]");
+    if (prev) prev.addEventListener("click", () => loadPreview(prev.getAttribute("data-preview")));
+
+    const box = root.querySelector('input[type="search"]');
+    box.addEventListener("input", () => {
+      state.query = box.value;
+      const caret = box.selectionStart;
+      render();
+      const next = document.querySelector('#root input[type="search"]');
+      if (next) { next.focus(); next.setSelectionRange(caret, caret); }
+    });
+
+    reportSize();
+  }
+
+  // ---- host plumbing -------------------------------------------------------
+  function applyTheme(theme) {
+    if (theme === "light" || theme === "dark") {
+      document.documentElement.setAttribute("data-theme", theme);
+    }
+  }
+
+  function applyDimensions(dims) {
+    if (!dims) return;
+    const el = document.documentElement;
+    if ("height" in dims) el.style.height = "100vh";
+    else if (dims.maxHeight) el.style.maxHeight = `${dims.maxHeight}px`;
+    if ("width" in dims) el.style.width = "100%";
+    else if (dims.maxWidth) el.style.maxWidth = `${dims.maxWidth}px`;
+  }
+
+  let lastW = 0, lastH = 0;
+  function reportSize() {
+    const w = Math.ceil(document.documentElement.scrollWidth);
+    const h = Math.ceil(document.body.scrollHeight);
+    if (w === lastW && h === lastH) return;
+    lastW = w; lastH = h;
+    notify("ui/notifications/size-changed", { width: w, height: h });
+  }
+
+  function ingest(result) {
+    const s = (result && result.structuredContent) || null;
+    if (!s || !Array.isArray(s.meetings)) return false;
+    state.meetings = s.meetings;
+    state.filters = s.filters || null;
+    if (!state.selected && state.meetings.length) {
+      const first = state.meetings.find((m) => m.has_summary) || state.meetings[0];
+      state.selected = first.meeting_id;
+    }
+    return true;
+  }
+
+  onNotify("ui/notifications/tool-result", (params) => {
+    if (!ingest(params)) {
+      document.getElementById("root").innerHTML =
+        `<p class="empty">This result carried no meeting index to render.</p>`;
+      reportSize();
+      return;
+    }
+    render();
+    if (state.selected) loadSummary(state.selected);
+  });
+
+  onNotify("ui/notifications/host-context-changed", (params) => {
+    if (params.theme) applyTheme(params.theme);
+    if (params.containerDimensions) applyDimensions(params.containerDimensions);
+    reportSize();
+  });
+
+  // tool-input is informational here; the result carries everything we render.
+  onNotify("ui/notifications/tool-input", () => {});
+
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    clientInfo: { name: "wispr-meetings-view", version: "1.0.0" },
+    appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+  }).then((result) => {
+    const ctx = (result && result.hostContext) || {};
+    applyTheme(ctx.theme);
+    applyDimensions(ctx.containerDimensions);
+    notify("ui/notifications/initialized", {});
+    if (window.ResizeObserver) new ResizeObserver(reportSize).observe(document.body);
+    reportSize();
+  }).catch(() => {
+    // No host handshake (opened outside a host, or the host declined). Stay
+    // rendered so the frame is never blank.
+    notify("ui/notifications/initialized", {});
+  });
+})();
+</script>
+</body>
+</html>

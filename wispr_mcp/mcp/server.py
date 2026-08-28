@@ -19,9 +19,75 @@ except ImportError:
     from wispr_mcp.mcp.apps import list_ui_resources, read_ui_resource
 
 
+#: A host may append control metadata to the END of the FIRST text content
+#: block and then scan only a truncated prefix of the joined content for it.
+#: Kiro Crew does exactly that: its MCP-Apps host appends a render marker to
+#: the first text block (``mcp_gateway/apps.py: append_marker``) while its ACP
+#: layer caps each block at 4000 characters before the dashboard looks for the
+#: marker (``acp/_dispatch.py: _build_tool_result_event``). One large block
+#: therefore pushes the marker past the cut and the ui:// view silently never
+#: mounts -- no error, no log. Leading with a short digest block keeps any such
+#: appended marker well inside the prefix. The full payload follows in a second
+#: block and still reaches the model intact over the MCP pipe, because the cut
+#: applies to the host's display event, not to the tool result itself.
+LEAD_BLOCK_THRESHOLD = 3000
+
+#: Hard cap on the digest block, so the lead can never itself overrun a
+#: prefix-scanning host.
+LEAD_BLOCK_MAX = 900
+
+#: Scalar string values longer than this are summarised by length instead of
+#: being inlined into the digest.
+_LEAD_SCALAR_MAX = 120
+
+
+def _digest_line(tool_name: str, result: Dict[str, Any]) -> str:
+    """One-line digest of ``result``'s scalar shape, for the lead block.
+
+    Only cheap, self-describing fields are inlined: short strings, numbers,
+    booleans and ``None``. Long strings and containers are reported by size so
+    the digest stays bounded regardless of payload.
+    """
+    parts: List[str] = []
+    for key, value in result.items():
+        if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+            parts.append(f"{key}={value}")
+        elif isinstance(value, str):
+            if len(value) <= _LEAD_SCALAR_MAX:
+                parts.append(f"{key}={value!r}")
+            else:
+                parts.append(f"{key}=<{len(value)} chars>")
+        elif isinstance(value, (list, tuple)):
+            parts.append(f"{key}=<{len(value)} items>")
+        elif isinstance(value, dict):
+            parts.append(f"{key}=<{len(value)} keys>")
+        else:
+            parts.append(f"{key}=<{type(value).__name__}>")
+    line = f"{tool_name}: " + ", ".join(parts)
+    if len(line) > LEAD_BLOCK_MAX:
+        line = line[:LEAD_BLOCK_MAX - 1] + "…"
+    return line
+
+
+def _model_content_blocks(tool_name: str, result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build the ``content`` array for a ``tools/call`` result.
+
+    Small results stay a single text block, which is what every host expects.
+    A large result is emitted as a short digest block followed by the full
+    payload, so a host that appends control metadata to the first block and
+    scans only a prefix still finds it (see :data:`LEAD_BLOCK_THRESHOLD`).
+    """
+    body = json.dumps(result, indent=2, default=str)
+    if len(body) <= LEAD_BLOCK_THRESHOLD:
+        return [{"type": "text", "text": body}]
+    return [
+        {"type": "text", "text": _digest_line(tool_name, result)},
+        {"type": "text", "text": body},
+    ]
+
+
 class MCPServer:
-    """JSON-RPC 2.0 STDIO server for MCP protocol."""
-    
+    """JSON-RPC 2.0 STDIO server for MCP protocol."""    
     def __init__(self, db_path: Optional[str] = None):
         self.tools = WisprTools(db_path)
         self.request_id = 0
@@ -109,12 +175,7 @@ class MCPServer:
         structured = result.pop("_ui_structured", None)
         
         payload: Dict[str, Any] = {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(result, indent=2, default=str)
-                }
-            ]
+            "content": _model_content_blocks(tool_name, result)
         }
         if structured is not None:
             payload["structuredContent"] = structured

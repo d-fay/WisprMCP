@@ -6,7 +6,10 @@ WisprMCP provides programmatic access to your Wispr Flow local database, enablin
 
 ## Recent Updates
 
+- **2026-08-28**: Added a second MCP App view -- `list_meetings` now serves a `ui://wispr/meetings` index with a summary drill-down that the view loads itself through the host's `serverTools` capability, so browsing meetings costs no model context
+- **2026-08-28**: Large tool results now lead with a short digest content block. A host that appends control metadata to the end of the first text block and then scans only a truncated prefix for it would otherwise lose that metadata on any result over ~4 KB -- which silently prevented `ui://` views from mounting at all (see [MCP App views](#-mcp-app-views-sep-1865))
 - **2026-08-27**: Added meetings support -- AI summaries, user notes, speaker-attributed NDJSON transcripts, todos, notetaker chats, calendar pre-reads, and a `get_datasource_inventory` drift check (10 tools -> 22)
+- **2026-08-27**: Added the first MCP App view -- `get_meeting_transcript` serves an interactive `ui://wispr/transcript` timeline
 - **2026-08-27**: Fixed `get_dictionary_entries`, which failed with `no such column: frequencySeen` after a Wispr Flow schema migration; queries now resolve columns at runtime
 - **2026-08-27**: Database is now opened read-only
 - **2025-07-04**: Added collect command for word extraction by day (similar to GranolaMCP)
@@ -103,38 +106,82 @@ WisprMCP provides programmatic access to your Wispr Flow local database, enablin
 - Runtime column resolution, so a Wispr Flow schema migration degrades instead of
   raising `no such column`
 - Token-aware transcript output: `text` (default), `markdown`, or capped `json`
-- Serves an **MCP App** (`ui://`) view for meeting transcripts — see below
+- Serves two **MCP App** (`ui://`) views — a meeting index and a transcript
+  timeline — see below
 
-### 🖼️ MCP App view (SEP-1865)
+### 🖼️ MCP App views (SEP-1865)
 
-`get_meeting_transcript` declares a `ui://wispr/transcript` resource, so a host
-that supports the `io.modelcontextprotocol/ui` extension renders the transcript as
-an interactive view — per-speaker filtering, text search, and inline display of
-user corrections — instead of a wall of JSON.
+Two tools declare a `ui://` resource, so a host that supports the
+`io.modelcontextprotocol/ui` extension renders an interactive view instead of a
+wall of JSON:
 
-The view is a single self-contained HTML file
-(`wispr_mcp/mcp/ui/transcript.html`) with **zero dependencies and no network
-requests**, so it cannot fail on a CDN. It declares its own fallbacks for every CSS
-variable and keys light/dark off the host's reported `theme`.
+| View | Declared on | What it shows |
+|------|-------------|---------------|
+| `ui://wispr/meetings` | `list_meetings` | Index of meetings — filter by title or speaker and by artifact availability, with a detail pane that loads the selected meeting's AI summary and notes on demand, plus an optional 12-entry transcript preview |
+| `ui://wispr/transcript` | `get_meeting_transcript` | Speaker-attributed timeline — per-speaker filtering, text search, and inline display of user corrections |
+
+Each view is a single self-contained HTML file under `wispr_mcp/mcp/ui/` with
+**zero dependencies and no network requests**, so neither can fail on a CDN. Each
+declares its own fallbacks for every CSS variable and keys light/dark off the
+host's reported `theme`.
+
+#### Two payloads, one result
 
 The model and the view get different payloads, which is the point:
 
 | | Goes to | Contents |
 |---|---|---|
 | `content` | model context | the compact `text`/`markdown`/capped-`json` form |
-| `structuredContent` | the view only | every entry, speakers, per-speaker breakdown, markers |
+| `structuredContent` | the view only | transcript: every entry, speakers, per-speaker breakdown, markers. index: every meeting row |
 
 So asking for `format="text"` keeps the model's context small while the view still
 renders all 100+ entries.
 
-**Enabling it is host-side, not server-side.** In Kiro Crew the server must be
-routed through the MCP gateway (**Developer → MCP Management**, or
-`mcp_gateway.stub_servers`), because the gateway is what intercepts the result and
-resolves the `ui://` resource. Without that you get the tool's text with no error.
-Note that routing a server restarts active sessions.
+#### The index loads its own detail
 
-Hosts with no MCP Apps support ignore the metadata entirely and the tool behaves
-exactly as before, so the declaration is safe unconditionally.
+The meeting index ships only the index rows up front. When you select a meeting it
+calls `get_meeting_summary` **itself**, through the host's `serverTools`
+capability, and caches the answer. Nothing about the drill-down passes through
+model context, so reading several summaries costs nothing and the view scales past
+the handful of rows a text response can carry.
+
+Two consequences worth knowing if you edit the tool definitions:
+
+- `get_meeting_summary` and `get_meeting_transcript` must stay **app-visible**.
+  A host filters an app-initiated `tools/call` by the tool's `_meta.ui.visibility`,
+  so giving either a model-only visibility breaks the drill-down silently.
+  `tests/test_ui_resources.py` pins this.
+- App-initiated calls are **schema-validated** by the host, so the arguments the
+  view sends have to satisfy the tool's own `inputSchema`.
+
+#### Large results lead with a digest block
+
+A result whose payload exceeds `LEAD_BLOCK_THRESHOLD` is emitted as **two** text
+content blocks: a short one-line digest first, then the full payload verbatim.
+
+This is not cosmetic. A host may append control metadata to the end of the *first*
+text block and then scan only a truncated prefix of the joined content for it —
+Kiro Crew appends an app-render marker and its ACP layer caps each block at 4000
+characters, so a single 12 KB block put the marker at offset ~12,840 and the view
+silently never mounted, with no error and no log line. Leading with a digest keeps
+any such appended marker a few hundred characters in. The model still receives the
+complete result, because that truncation applies to the host's display event rather
+than to the tool result itself.
+
+#### Enabling the views is host-side, not server-side
+
+In Kiro Crew the server must be routed through the MCP gateway
+(**Developer → MCP Management**, or `mcp_gateway.stub_servers`), because the
+gateway is what intercepts the result and resolves the `ui://` resource. Without
+that you get the tool's text with no error. Note that routing a server restarts
+active sessions.
+
+These views are **viewers**. Kiro Crew answers `ui/message` and
+`ui/update-model-context` with `-32601`, so a click cannot feed a selection back
+into model context; every control only changes what is displayed.
+
+Hosts with no MCP Apps support ignore the metadata entirely and both tools behave
+exactly as before, so the declarations are safe unconditionally.
 
 ## Installation
 
@@ -148,7 +195,7 @@ exactly as before, so the declaration is safe unconditionally.
 
 ```bash
 # Clone the repository
-git clone https://github.com/pedram/WisprMCP.git
+git clone https://github.com/d-fay/WisprMCP.git
 cd WisprMCP
 
 # Install the package
@@ -172,7 +219,7 @@ wispr --help
 
 ```bash
 # Clone and install with development dependencies
-git clone https://github.com/pedram/WisprMCP.git
+git clone https://github.com/d-fay/WisprMCP.git
 cd WisprMCP
 pip install -e ".[dev]"
 
@@ -433,6 +480,10 @@ structured transcript can be tens of thousands of tokens; use `format="json"` wi
 `max_entries` when you need timings, and `source="live"` for raw uncoalesced
 utterances instead of the refined pass.
 
+`list_meetings` and `get_meeting_transcript` each additionally serve an interactive
+`ui://` view on hosts that support MCP Apps — see
+[MCP App views](#-mcp-app-views-sep-1865).
+
 ### Example MCP Usage in Claude
 
 ```
@@ -588,7 +639,10 @@ wispr_mcp/
 ├── core/                      # Core business logic
 │   ├── parser.py             # Database access and parsing
 │   ├── transcript.py         # Transcript data models
-│   └── conversation.py       # Conversation data models
+│   ├── conversation.py       # Conversation data models
+│   ├── meeting.py            # Meeting, summary and speaker-map models
+│   ├── notes.py              # Notes, todos, chats, calendar models
+│   └── artifacts.py          # On-disk NDJSON transcript artifacts
 ├── utils/                     # Utility functions
 │   ├── config.py             # Configuration management
 │   └── date_parser.py        # Date parsing utilities
@@ -597,8 +651,16 @@ wispr_mcp/
 │   ├── commands/             # CLI command implementations
 │   └── formatters/           # Output formatting
 └── mcp/                      # MCP server implementation
-    ├── server.py             # JSON-RPC 2.0 server
-    └── tools.py              # MCP tool definitions
+    ├── server.py             # JSON-RPC 2.0 server, content-block envelope
+    ├── tools.py              # MCP tool definitions
+    ├── apps.py               # ui:// resource registry (MCP Apps, SEP-1865)
+    └── ui/                   # Self-contained view HTML, zero dependencies
+        ├── meetings.html     # Meeting index + summary drill-down
+        └── transcript.html   # Speaker-attributed transcript timeline
+
+tests/                         # Stdlib unittest, no dependencies
+├── test_server_envelope.py   # Content-block shape and server round-trips
+└── test_ui_resources.py      # ui:// registry and tool<->view bindings
 ```
 
 ### Design Principles
@@ -615,35 +677,39 @@ wispr_mcp/
 
 ```bash
 # Clone repository
-git clone https://github.com/pedram/WisprMCP.git
+git clone https://github.com/d-fay/WisprMCP.git
 cd WisprMCP
 
-# Install development dependencies
-pip install -e ".[dev]"
+# Install in editable mode
+pip install -e .
 
-# Run tests
-pytest
-
-# Format code
-black wispr_mcp/
-flake8 wispr_mcp/
-
-# Type checking
-mypy wispr_mcp/
+# Run tests (stdlib unittest -- no test dependencies)
+python3 -m unittest discover -s tests -v
 ```
 
 ### Running Tests
 
+The suite is plain `unittest` from the standard library, matching the project's
+zero-dependency principle. It drives the real `mcp_server.py` over stdio and reads
+the real Wispr Flow database, so tests that need data skip cleanly on a machine
+with an empty database rather than failing.
+
 ```bash
 # Run all tests
-pytest
+python3 -m unittest discover -s tests -v
 
-# Run with coverage
-pytest --cov=wispr_mcp
+# Run one module
+python3 -m unittest tests.test_ui_resources -v
 
-# Run specific test file
-pytest tests/test_parser.py
+# Run one test
+python3 -m unittest tests.test_server_envelope.ContentBlockShape -v
 ```
+
+To check a `ui://` view's own behaviour without a browser, run its script against
+a stub host that replays the MCP Apps bridge (`ui/initialize` → `initialized` →
+`tool-input` → `tool-result`, plus the app-initiated `tools/call` path). A headless
+browser is a poor oracle here: a screenshot can land mid-handshake and show an
+empty frame that is actually fine.
 
 ## Troubleshooting
 
@@ -706,6 +772,32 @@ MIT License - see LICENSE file for details.
 
 ## Changelog
 
+### Unreleased
+- **NEW**: `ui://wispr/meetings` — meeting index MCP App view with a lazy summary
+  drill-down over the host's `serverTools` capability
+- **NEW**: `tests/` — stdlib `unittest` suite covering the content-block envelope,
+  the `ui://` registry, and the tool↔view bindings
+- **FIX**: large results lead with a digest content block, so a host that appends
+  control metadata to the first block and scans only a truncated prefix does not
+  lose it (this silently prevented `ui://` views from mounting)
+- **FIX**: `setup.py` version now matches `__version__` (was 0.1.0 vs 0.2.0)
+
+### v0.2.0 (2026-08-27)
+- **NEW**: Meetings surface — `list_meetings`, `get_meeting`, `get_meeting_summary`,
+  `get_meeting_transcript`, `search_meetings`
+- **NEW**: Notes, todos, notetaker chats and calendar pre-reads
+- **NEW**: `get_datasource_inventory` — every table, row count, and read coverage,
+  so a Wispr Flow update that adds a table is visible instead of silently unread
+- **NEW**: `ui://wispr/transcript` — first MCP App view (SEP-1865)
+- **NEW**: Speaker-name resolution from `speakerMap`, and user corrections applied
+  to transcript text
+- **IMPROVEMENT**: Database opened read-only (`mode=ro`)
+- **IMPROVEMENT**: Summary normalisation repairs glued headings and collapses
+  duplicated sections in a locally cached summary
+- **FIX**: `get_dictionary_entries` no longer raises `no such column:
+  frequencySeen`; columns resolve at runtime
+- 10 tools → 22
+
 ### v0.1.0 (2025-07-04)
 - **NEW**: Added `collect` command for extracting words by day (YYYY-MM-DD.txt files)
 - **NEW**: Sane defaults - `wispr list` now defaults to last 2 days instead of all entries
@@ -717,15 +809,19 @@ MIT License - see LICENSE file for details.
 
 ## Related Projects
 
+- **Upstream**: [pedramamini/WisprMCP](https://github.com/pedramamini/WisprMCP) — this
+  repository is a fork; the meetings surface, the `ui://` MCP App views and the
+  test suite were added here
 - **Wispr Flow**: AI-powered voice transcription app
 - **Claude Desktop**: AI assistant with MCP support
 - **Model Context Protocol**: Standard for AI tool integration
+- **MCP Apps (SEP-1865)**: The `io.modelcontextprotocol/ui` extension the `ui://`
+  views implement
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/pedram/WisprMCP/issues)
+- **Issues**: [GitHub Issues](https://github.com/d-fay/WisprMCP/issues)
 - **Documentation**: This README and inline code documentation
-- **Examples**: See `examples/` directory for usage samples
 
 ## Quick Reference
 

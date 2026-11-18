@@ -98,7 +98,17 @@ class MCPServer:
             method = request_data.get("method")
             params = request_data.get("params", {})
             request_id = request_data.get("id")
-            
+
+            if "id" not in request_data:
+                # JSON-RPC notification (e.g. notifications/initialized) — no
+                # "id" field, no response allowed. Answering it races the
+                # client's next read during the initialize ->
+                # notifications/initialized -> tools/list handshake: the
+                # client ends up reading this stray reply as the answer to
+                # tools/list instead, surfacing as "tools/list: Method not
+                # found: notifications/initialized".
+                return None
+
             if method == "initialize":
                 return self._handle_initialize(request_id, params)
             elif method == "tools/list":
